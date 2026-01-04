@@ -1,0 +1,30 @@
+# Data
+data/
+datasets/
+
+# Experiments & outputs
+experiments/
+runs/
+logs/
+
+# Models
+*.pt
+*.pth
+*.ckpt
+*.h5
+
+# Python
+__pycache__/
+*.pyc
+.env
+.venv
+
+# OS
+.DS_Store
+
+# Keys / secrets
+key
+key.pub
+*.pem
+*.key
+
