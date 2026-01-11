@@ -1,218 +1,4 @@
-'''
-import os
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import matplotlib.pyplot as plt
-from scipy.ndimage import label
-from torch.utils.data import TensorDataset, DataLoader
 
-# -----------------------------
-# Configuration
-# -----------------------------
-SAVE_DIR = "dataset/dataset_cantilever_sym6_mmc"
-os.makedirs(SAVE_DIR, exist_ok=True)
-
-# VAE config
-LATENT_DIM = 20
-BATCH_SIZE = 8
-EPOCHS = 100
-LR = 1e-3
-
-# Constraints (from paper)
-GRID = 64
-MIN_AREA_FRAC = 0.10
-MAX_AREA_FRAC = 0.50
-MIN_AREA = int(MIN_AREA_FRAC * GRID * GRID)
-MAX_AREA = int(MAX_AREA_FRAC * GRID * GRID)
-LARGE_COMPONENT_RATIO = 0.90
-LOAD_POINT_X = GRID - 1
-LOAD_POINT_Y = GRID // 2
-LOAD_POINT_WINDOW = 3
-
-# -----------------------------
-# VAE Model
-# -----------------------------
-class VAE3Channel(nn.Module):
-    def __init__(self, latent_dim=20):
-        super().__init__()
-        self.latent_dim = latent_dim
-        
-        # Encoder: 3 input channels
-        self.enc_conv = nn.Sequential(
-            nn.Conv2d(3, 32, 4, stride=2, padding=1),   # 64→32
-            nn.ReLU(),
-            nn.Conv2d(32, 64, 4, stride=2, padding=1),  # 32→16
-            nn.ReLU(),
-            nn.Conv2d(64, 128, 4, stride=2, padding=1), # 16→8
-            nn.ReLU(),
-            nn.Flatten()
-        )
-        self.fc_mu = nn.Linear(128 * 8 * 8, latent_dim)
-        self.fc_logvar = nn.Linear(128 * 8 * 8, latent_dim)
-        
-        # Decoder: 1 output channel
-        self.dec_fc = nn.Sequential(
-            nn.Linear(latent_dim, 128 * 8 * 8),
-            nn.ReLU()
-        )
-        self.dec_conv = nn.Sequential(
-            nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1), # 8→16
-            nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, 4, stride=2, padding=1),  # 16→32
-            nn.ReLU(),
-            nn.ConvTranspose2d(32, 1, 4, stride=2, padding=1),   # 32→64
-            nn.Sigmoid()
-        )
-
-    def encode(self, x):
-        h = self.enc_conv(x)
-        return self.fc_mu(h), self.fc_logvar(h)
-
-    def reparameterize(self, mu, logvar):
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        return mu + eps * std
-
-    def decode(self, z):
-        h = self.dec_fc(z)
-        h = h.view(-1, 128, 8, 8)
-        return self.dec_conv(h)
-
-    def forward(self, x):
-        mu, logvar = self.encode(x)
-        z = self.reparameterize(mu, logvar)
-        return self.decode(z), mu, logvar
-
-# -----------------------------
-# Feasibility Validator 
-# -----------------------------
-def is_feasible(rho_recon):
-    geom = (rho_recon > 0.5).astype(np.uint8)
-    area = geom.sum()
-    if area < MIN_AREA or area > MAX_AREA:
-        return False
-
-    labeled, num = label(geom, structure=np.ones((3,3)))
-    if num == 0:
-        return False
-    sizes = [(labeled == k).sum() for k in range(1, num + 1)]
-    largest = max(sizes)
-    if largest < LARGE_COMPONENT_RATIO * area:
-        return False
-    main_mask = (labeled == (1 + sizes.index(largest)))
-
-    if main_mask[:, 0].sum() == 0:
-        return False
-
-    y_low = max(0, LOAD_POINT_Y - LOAD_POINT_WINDOW)
-    y_high = min(GRID, LOAD_POINT_Y + LOAD_POINT_WINDOW + 1)
-    if main_mask[y_low:y_high, LOAD_POINT_X].sum() == 0:
-        return False
-
-    return True
-
-# -----------------------------
-# Main
-# -----------------------------
-def main():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-
-    # Load data
-    phi = np.load(os.path.join(SAVE_DIR, "phi.npy"))
-    rho_smooth = np.load(os.path.join(SAVE_DIR, "rho_smooth.npy"))
-    geometry = np.load(os.path.join(SAVE_DIR, "geometry.npy"))
-
-    # Normalize phi to [0,1]
-    phi_clipped = np.clip(phi, -5.0, 1.0)
-    phi_norm = (phi_clipped - (-5.0)) / (1.0 - (-5.0))
-
-    # Stack input channels
-    input_channels = np.stack([phi_norm, rho_smooth, geometry], axis=1).astype(np.float32)
-    target = rho_smooth.astype(np.float32)
-
-    # Create dataset
-    X = torch.from_numpy(input_channels)
-    y = torch.from_numpy(target).unsqueeze(1)
-    dataset = TensorDataset(X, y)
-    loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
-
-    # Model
-    model = VAE3Channel(latent_dim=LATENT_DIM).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
-
-    # Loss
-    def vae_loss(recon, target, mu, logvar):
-        recon_loss = F.mse_loss(recon, target, reduction='sum')
-        kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-        return recon_loss + kld
-
-    # Training
-    model.train()
-    for epoch in range(EPOCHS):
-        total_loss = 0
-        for batch_x, batch_y in loader:
-            batch_x, batch_y = batch_x.to(device), batch_y.to(device)
-            optimizer.zero_grad()
-            recon, mu, logvar = model(batch_x)
-            loss = vae_loss(recon, batch_y, mu, logvar)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-        print(f"Epoch {epoch+1}/{EPOCHS}, Loss: {total_loss/len(loader):.4f}")
-
-    # Save model
-    torch.save(model.state_dict(), os.path.join(SAVE_DIR, "vae_model.pth"))
-    print("✅ Model saved.")
-
-    # Evaluation
-    model.eval()
-    with torch.no_grad():
-        recon, _, _ = model(X.to(device))
-        recon_np = recon.cpu().numpy().squeeze(1)
-
-    # Save reconstructions
-    np.save(os.path.join(SAVE_DIR, "recon_rho.npy"), recon_np)
-
-    # Feasibility check
-    feasible_count = sum(is_feasible(recon_np[i]) for i in range(recon_np.shape[0]))
-    feasibility_rate = feasible_count / recon_np.shape[0]
-    print(f"\n✅ Feasibility rate: {feasible_count}/{recon_np.shape[0]} = {feasibility_rate:.1%}")
-
-    # Visualization
-    n_show = min(5, recon_np.shape[0])
-    fig, axes = plt.subplots(n_show, 4, figsize=(14, 3.5 * n_show))
-    fig.suptitle("VAE Reconstruction: [Input-phi, Input-rho, Target, Recon]", fontsize=14)
-
-    for i in range(n_show):
-        axes[i, 0].imshow(phi[i], cmap='RdBu', origin='lower')
-        axes[i, 0].set_title("Input: phi")
-        axes[i, 0].axis('off')
-        
-        axes[i, 1].imshow(rho_smooth[i], cmap='gray', origin='lower')
-        axes[i, 1].set_title("Input: rho")
-        axes[i, 1].axis('off')
-        
-        axes[i, 2].imshow(rho_smooth[i], cmap='gray', origin='lower')
-        axes[i, 2].set_title("Target: rho")
-        axes[i, 2].axis('off')
-        
-        axes[i, 3].imshow(recon_np[i], cmap='gray', origin='lower')
-        axes[i, 3].set_title("Recon: rho")
-        axes[i, 3].axis('off')
-
-    plt.tight_layout()
-    plt.savefig(os.path.join(SAVE_DIR, "vae_reconstructions.png"), dpi=150, bbox_inches='tight')
-    plt.show()
-
-    print("\n✅ Done.")
-
-if __name__ == "__main__":
-    main()
-
-'''
 
 import os
 import numpy as np
@@ -228,13 +14,14 @@ import matplotlib.pyplot as plt
 # -----------------------------
 DATASETS = [
     "dataset/dataset_cantilever_sym6_mmc",
-    "dataset/dataset_cantilever_sym6_mmc1"
+    "dataset/dataset_cantilever_sym6_mmc1",
+    "dataset/dataset_cantilever_sym6_mmc2"
 ]
 OUTPUT_DIR = "dataset/merged_vae_train"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # VAE config
-LATENT_DIM = 16
+LATENT_DIM = 32
 BATCH_SIZE = 32
 EPOCHS = 150
 LR = 1e-3
@@ -392,8 +179,34 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 
     # Loss with β-annealing
+    #def vae_loss(recon, target, mu, logvar, beta=1.0):
+        #recon_loss = F.mse_loss(recon, target, reduction='sum')
+        #kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+        #return recon_loss + beta * kld
+    
+    def feasibility_loss(rho_recon):
+        # 1. Volume
+        #vol = rho_recon.mean(dim=[1,2,3])
+        #vol_loss = F.mse_loss(vol, torch.full_like(vol, 0.3))
+        
+        # 2. Contact
+        support_contact = rho_recon[:, :, :, 0].mean()
+        y_low = max(0, LOAD_POINT_Y - 2)
+        y_high = min(GRID, LOAD_POINT_Y + 3)
+        load_contact = rho_recon[:, :, y_low:y_high, LOAD_POINT_X].mean()
+        contact_loss = F.mse_loss(support_contact, torch.tensor(1.0).to(rho_recon.device)) + \
+                    F.mse_loss(load_contact, torch.tensor(1.0).to(rho_recon.device))
+        
+        # 3. Smoothness (proxy for connectivity)
+        tv = torch.sum(torch.abs(rho_recon[:, :, :, :-1] - rho_recon[:, :, :, 1:])) + \
+            torch.sum(torch.abs(rho_recon[:, :, :-1, :] - rho_recon[:, :, 1:, :]))
+        tv_loss = tv / rho_recon.numel()
+        
+        return 1.0 * contact_loss + 0.1 * tv_loss
+
     def vae_loss(recon, target, mu, logvar, beta=1.0):
-        recon_loss = F.mse_loss(recon, target, reduction='sum')
+        # recon and target in [0,1]
+        recon_loss = F.binary_cross_entropy(recon, target, reduction='sum')
         kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
         return recon_loss + beta * kld
 
@@ -412,7 +225,8 @@ def main():
             x = x.to(device)
             optimizer.zero_grad()
             recon, mu, logvar = model(x)
-            loss = vae_loss(recon, x, mu, logvar, beta=beta)
+            #loss = vae_loss(recon, x, mu, logvar, beta=beta)
+            loss = vae_loss(recon, x, mu, logvar, beta=beta) + feasibility_loss(recon)
             loss.backward()
             optimizer.step()
             train_loss += loss.item()
@@ -426,7 +240,8 @@ def main():
             for x, _ in val_loader:
                 x = x.to(device)
                 recon, mu, logvar = model(x)
-                loss = vae_loss(recon, x, mu, logvar, beta=1.0)
+                beta = min(3.0, 0.1 + 2.9 * epoch / 100) 
+                loss = vae_loss(recon, x, mu, logvar, beta=beta)
                 val_loss += loss.item()
         val_loss /= len(val_loader)
         val_losses.append(val_loss)
