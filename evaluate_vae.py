@@ -1,5 +1,5 @@
 
-
+'''
 import os
 import numpy as np
 import torch
@@ -8,6 +8,8 @@ import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader
 from scipy.ndimage import label
 import matplotlib.pyplot as plt
+from kornia.morphology import closing
+from hybrid_vae import HybridVAE
 
 # -----------------------------
 # Configuration
@@ -175,7 +177,8 @@ def main():
     val_loader = DataLoader(TensorDataset(X_val, X_val), batch_size=BATCH_SIZE, shuffle=False)
 
     # Model
-    model = TopologyVAE(latent_dim=LATENT_DIM).to(device)
+    #model = TopologyVAE(latent_dim=LATENT_DIM).to(device)
+    model = HybridVAE(latent_dim=LATENT_DIM).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 
     # Loss with β-annealing
@@ -208,8 +211,13 @@ def main():
         # recon and target in [0,1]
         recon_loss = F.binary_cross_entropy(recon, target, reduction='sum')
         kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-        return recon_loss + beta * kld
-
+        #return recon_loss + beta * kld
+        vae_loss = recon_loss + beta * kld
+        kernel = torch.ones(3, 3).to(recon.device)
+        recon_sharp = closing(recon, kernel)
+        sharp_loss = F.mse_loss(recon_sharp, target, reduction='sum')
+        
+        return vae_loss + 0.1 * sharp_loss
     # Training loop with validation
     best_val_loss = float('inf')
     train_losses, val_losses = [], []
@@ -295,6 +303,254 @@ def main():
     plt.tight_layout()
     plt.savefig(os.path.join(OUTPUT_DIR, "test_reconstructions.png"), dpi=150)
     plt.show()
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+import os
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import TensorDataset, DataLoader
+from scipy.ndimage import label
+import matplotlib.pyplot as plt
+
+# -----------------------------
+# Configuration
+# -----------------------------
+DATASETS = [
+    "dataset/dataset_cantilever_sym6_mmc",
+    "dataset/dataset_cantilever_sym6_mmc1",
+    "dataset/dataset_cantilever_sym6_mmc2",
+    "dataset/dataset_cantilever_sym6_mmc3",
+    "dataset/dataset_cantilever_sym6_mmc4",
+    "dataset/dataset_cantilever_sym6_mmc5",
+    "dataset/dataset_cantilever_sym6_mmc6"
+]
+
+OUTPUT_DIR = "dataset/merged_vae_train"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+GRID = 64
+LATENT_DIM = 32
+BATCH_SIZE = 32
+EPOCHS = 150
+LR = 1e-3
+
+TRAIN_RATIO = 0.7
+VAL_RATIO = 0.15
+
+MIN_AREA_FRAC = 0.10
+MAX_AREA_FRAC = 0.50
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# -----------------------------
+# VAE MODEL
+# -----------------------------
+class TopologyVAE(nn.Module):
+    def __init__(self, latent_dim=16):
+        super().__init__()
+        self.latent_dim = latent_dim
+        
+        # Encoder
+        self.enc = nn.Sequential(
+            nn.Conv2d(1, 32, 4, stride=2, padding=1),   # 64→32
+            nn.ReLU(),
+            nn.Conv2d(32, 64, 4, stride=2, padding=1),  # 32→16
+            nn.ReLU(),
+            nn.Conv2d(64, 128, 4, stride=2, padding=1), # 16→8
+            nn.ReLU(),
+            nn.Conv2d(128, 256, 4, stride=2, padding=1), # 8→4
+            nn.ReLU(),
+            nn.Flatten()
+        )
+        self.fc_mu = nn.Linear(256 * 4 * 4, latent_dim)
+        self.fc_logvar = nn.Linear(256 * 4 * 4, latent_dim)
+        
+        # Decoder
+        self.dec_fc = nn.Sequential(
+            nn.Linear(latent_dim, 256 * 4 * 4),
+            nn.ReLU()
+        )
+        self.dec = nn.Sequential(
+            nn.ConvTranspose2d(256, 128, 4, stride=2, padding=1), # 4→8
+            nn.ReLU(),
+            nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1),   # 8→16
+            nn.ReLU(),
+            nn.ConvTranspose2d(64, 32, 4, stride=2, padding=1),    # 16→32
+            nn.ReLU(),
+            nn.ConvTranspose2d(32, 1, 4, stride=2, padding=1),     # 32→64
+            nn.Sigmoid()
+        )
+
+    def encode(self, x):
+        h = self.enc(x)
+        return self.fc_mu(h), self.fc_logvar(h)
+
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
+    def decode(self, z):
+        h = self.dec_fc(z)
+        h = h.view(-1, 256, 4, 4)
+        return self.dec(h)
+
+    def forward(self, x):
+        mu, logvar = self.encode(x)
+        z = self.reparameterize(mu, logvar)
+        return self.decode(z), mu, logvar
+
+# -----------------------------
+# LOSS FUNCTIONS
+# -----------------------------
+def projection_loss(rho):
+    rho_bin = (rho > 0.5).float()
+    return F.mse_loss(rho, rho_bin.detach())
+
+def volume_loss(rho):
+    vol = rho.mean(dim=[1,2,3])
+    target = 0.5 * (MIN_AREA_FRAC + MAX_AREA_FRAC)
+    return F.mse_loss(vol, torch.full_like(vol, target))
+
+def entropy_loss(rho):
+    eps = 1e-6
+    return -(rho * torch.log(rho + eps) + (1 - rho) * torch.log(1 - rho + eps)).mean()
+
+def thinness_loss(rho):
+    laplace = (
+        -4 * rho +
+        torch.roll(rho, 1, 2) +
+        torch.roll(rho, -1, 2) +
+        torch.roll(rho, 1, 3) +
+        torch.roll(rho, -1, 3)
+    )
+    return torch.mean(torch.abs(laplace))
+
+def binary_loss(rho):
+    return torch.mean(rho * (1 - rho))
+
+def vae_loss(recon, target, mu, logvar, beta):
+    recon_loss = F.binary_cross_entropy(recon, target, reduction="mean")
+    kld = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+
+    loss = (
+        recon_loss +
+        beta * kld +
+        1.0 * projection_loss(recon) +
+        0.5 * volume_loss(recon) +
+        0.2 * entropy_loss(recon) +
+        0.05 * thinness_loss(recon) + 
+        1.0 * binary_loss(recon)
+
+    )
+    return loss
+
+# -----------------------------
+# DATA LOADING
+# -----------------------------
+def load_and_merge():
+    data = []
+    for d in DATASETS:
+        rho = np.load(os.path.join(d, "rho_smooth.npy"))
+        data.append(rho)
+        print(f"Loaded {rho.shape[0]} from {d}")
+    return np.concatenate(data, axis=0)
+
+# -----------------------------
+# FEASIBILITY CHECK (unchanged)
+# -----------------------------
+def is_feasible(rho):
+    geom = (rho > 0.5).astype(np.uint8)
+    area = geom.sum()
+
+    if area < MIN_AREA_FRAC * GRID * GRID:
+        return False
+    if area > MAX_AREA_FRAC * GRID * GRID:
+        return False
+
+    labeled, num = label(geom)
+    if num == 0:
+        return False
+
+    sizes = [(labeled == k).sum() for k in range(1, num + 1)]
+    if max(sizes) < 0.9 * area:
+        return False
+
+    return True
+
+# -----------------------------
+# TRAINING
+# -----------------------------
+def main():
+    data = load_and_merge()
+    np.random.shuffle(data)
+
+    N = len(data)
+    n_train = int(0.7 * N)
+    n_val = int(0.15 * N)
+
+    train = torch.tensor(data[:n_train]).unsqueeze(1).float()
+    val = torch.tensor(data[n_train:n_train+n_val]).unsqueeze(1).float()
+    test = torch.tensor(data[n_train+n_val:]).unsqueeze(1).float()
+
+    train_loader = DataLoader(train, BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(val, BATCH_SIZE)
+
+    model = TopologyVAE(LATENT_DIM).to(DEVICE)
+    opt = torch.optim.Adam(model.parameters(), lr=LR)
+
+    best_val = float("inf")
+
+    for epoch in range(EPOCHS):
+        beta = min(1.0, epoch / 50)
+
+        model.train()
+        train_loss = 0
+        for x in train_loader:
+            x = x.to(DEVICE)
+            opt.zero_grad()
+            recon, mu, logvar = model(x)
+            loss = vae_loss(recon, x, mu, logvar, beta)
+            loss.backward()
+            opt.step()
+            train_loss += loss.item()
+
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for x in val_loader:
+                x = x.to(DEVICE)
+                recon, mu, logvar = model(x)
+                val_loss += vae_loss(recon, x, mu, logvar, beta).item()
+
+        train_loss /= len(train_loader)
+        val_loss /= len(val_loader)
+
+        print(f"Epoch {epoch+1:03d} | β={beta:.2f} | Train={train_loss:.4f} | Val={val_loss:.4f}")
+
+        if val_loss < best_val:
+            best_val = val_loss
+            torch.save(model.state_dict(), os.path.join(OUTPUT_DIR, "vae_best.pth"))
+
+    # -----------------------------
+    # TEST
+    # -----------------------------
+    model.load_state_dict(torch.load(os.path.join(OUTPUT_DIR, "vae_best.pth")))
+    model.eval()
+
+    with torch.no_grad():
+        recon = model(test.to(DEVICE))[0].cpu().numpy()
+
+    feasible = sum(is_feasible(r.squeeze()) for r in recon)
+    print(f"Feasible reconstructions: {feasible}/{len(recon)} ({100*feasible/len(recon):.1f}%)")
+
+    np.save(os.path.join(OUTPUT_DIR, "test_recon.npy"), recon)
 
 if __name__ == "__main__":
     main()
