@@ -6,6 +6,8 @@ from cma import CMAEvolutionStrategy
 from vae_model import TopologyVAE
 from fem_code import fem_physical_compliance, is_feasible, save_fem_to_vtk
 import joblib
+from sklearn.metrics import pairwise_distances
+
 
 def save_fem_to_vtk(geom, u, vm_stress, filename, domain_size=(20.0, 10.0)):
     import vtk
@@ -111,9 +113,9 @@ MODEL_PATH = "dataset/merged_vae_train/vae_best.pth"
 SURROGATE_PATH = "surrogate/gp_surrogate.pkl"
 SCALER_PATH = "surrogate/z_scaler.pkl"
 LATENT_DIM = 32
-FEM_BUDGET = 100
+FEM_BUDGET = 250
 POPSIZE = 12
-FEM_PER_GEN = 3
+FEM_PER_GEN = 8
 RESULTS_DIR = "results"
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -130,6 +132,21 @@ def surrogate_predict(z):
     """Cheap compliance prediction (with scaling)"""
     z_scaled = scaler.transform(z.reshape(1, -1))
     return gp.predict(z_scaled)[0]
+
+LAMBDA = 5.0  # trust penalty weight (tune 2–10)
+
+def surrogate_predict1(z):
+    z_scaled = scaler.transform(z.reshape(1, -1))
+    
+    # GP mean prediction
+    mu = gp.predict(z_scaled)[0]
+    
+    # Distance to nearest training point
+    d = np.min(pairwise_distances(z_scaled, gp.X_train_))
+    
+    # Penalized surrogate objective
+    return mu + LAMBDA * d
+
 
 def real_objective(z):
     """Expensive FEM evaluation"""

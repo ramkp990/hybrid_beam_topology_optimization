@@ -18,7 +18,7 @@ DATASETS = [
     "dataset/dataset_cantilever_sym6_mmc6",
     "dataset/dataset_cantilever_sym6_mmc7",
     "dataset/dataset_cantilever_sym6_mmc8",
-    "dataset/dataset_cantilever_sym6_mmc9"
+    "dataset/dataset_cmaes"
 ]
 
 # Load VAE encoder
@@ -32,9 +32,11 @@ all_compliance = []
 
 with torch.no_grad():
     for d in DATASETS:
+        print(f"\n📂 Loading dataset from {d}...")
         rho = np.load(os.path.join(d, "rho_smooth.npy"))
         meta = np.load(os.path.join(d, "metadata_with_compliance.npy"), allow_pickle=True)
         compliance = meta['compliance']
+        print(compliance)
         
         rho_tensor = torch.from_numpy(rho).unsqueeze(1).float().to(device)
         mu, _ = model.encode(rho_tensor)
@@ -49,10 +51,8 @@ z_train = np.concatenate(all_z, axis=0)
 compliance_train = np.concatenate(all_compliance, axis=0)
 print(f"\n✅ Total samples: {len(z_train)}")
 
-
-
 # --- CRITICAL: Use subset for GP training ---
-SUBSET_SIZE = 4000
+SUBSET_SIZE = 6000
 if len(z_train) > SUBSET_SIZE:
     indices = np.random.choice(len(z_train), size=SUBSET_SIZE, replace=False)
     z_train = z_train[indices]
