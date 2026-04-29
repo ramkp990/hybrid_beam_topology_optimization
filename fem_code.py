@@ -12,12 +12,13 @@ from scipy.ndimage import binary_dilation
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
+import torch
 
 # Constants (or import from constants.py)
 N = 1000
 GRID = 64
 MIN_AREA_FRAC = 0.10
-MAX_AREA_FRAC = 0.50
+MAX_AREA_FRAC = 0.30
 MIN_AREA = int(MIN_AREA_FRAC * GRID * GRID)
 MAX_AREA = int(MAX_AREA_FRAC * GRID * GRID)
 
@@ -245,6 +246,8 @@ def fem_physical_compliance(geom, load_node=None, load_value=-100.0,
 
     return compliance, u
 
+
+
 def is_feasible(rho_recon):
     """
     Check if a density field is feasible.
@@ -257,27 +260,32 @@ def is_feasible(rho_recon):
     # Volume constraint
     area = geom.sum()
     if area < MIN_AREA or area > MAX_AREA:
+        print(f"  [DEBUG] Area {area} out of bounds ({MIN_AREA} - {MAX_AREA})")
         return False
 
     # Connectivity constraint
     labeled, num = label(geom, structure=np.ones((3,3), dtype=np.int8))
     if num == 0:
+        print("  [DEBUG] No connected components found")
         return False
     sizes = [(labeled == k).sum() for k in range(1, num + 1)]
     largest = max(sizes)
     if largest < LARGE_COMPONENT_RATIO * area:
+        print(f"  [DEBUG] Largest component area {largest} is less than {LARGE_COMPONENT_RATIO*area:.1f} (total {area})")
         return False
     main_idx = 1 + sizes.index(largest)
     main_mask = (labeled == main_idx)
 
     # Support contact (left edge)
     if main_mask[:, 0].sum() == 0:
+        print("  [DEBUG] No contact on left edge")
         return False
 
     # Load contact (right-center window)
     y_low = max(0, LOAD_POINT_Y - LOAD_POINT_WINDOW)
     y_high = min(GRID, LOAD_POINT_Y + LOAD_POINT_WINDOW + 1)
     if main_mask[y_low:y_high, LOAD_POINT_X].sum() == 0:
+        print("  [DEBUG] No contact in load window")
         return False
 
     return True
