@@ -162,7 +162,7 @@ import numpy as np
 import torch
 from cma import CMAEvolutionStrategy
 
-from vae_model import TopologyVAE
+from evaluate_vae_report_com import TopologyVAE
 from fem_code import fem_physical_compliance, is_feasible
 
 # -----------------------------
@@ -278,6 +278,12 @@ def main():
                 vm,
                 filename=f"results/vti/gen_{generation:03d}.vti"
             )
+            # save every z and complaice as npz to visualize the search using umap
+            np.savez(
+                os.path.join(DENSITY_DIR, f"gen_{generation:03d}.npz"),
+                z=gen_best_z,
+                compliance=compliance
+            )
 
             saved_count += 1
 
@@ -296,7 +302,8 @@ def main():
 
     # Save raw
     np.save(os.path.join(RESULTS_DIR, "best_rho.npy"), best_rho)
-
+    # save best z as npz for later analysis
+    np.savez(os.path.join(RESULTS_DIR, "best_z.npz"), z=best_z)
     compliance, _ = fem_physical_compliance(
         best_rho,
         save_vtk=True,
