@@ -6,9 +6,9 @@ import matplotlib.pyplot as plt
 
 from fem_code import fem_physical_compliance, is_feasible, element_stiffness_plane_stress
 
-# ─────────────────────────────────────────
+
 # Config
-# ─────────────────────────────────────────
+
 GRID          = 64
 LATENT_DIM    = 32
 DEVICE        = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -16,7 +16,7 @@ DEVICE        = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MIN_AREA_FRAC = 0.10
 MAX_AREA_FRAC = 0.50
 
-TOTAL_STEPS   = 600         # steps 67–199 → Phase 2
+TOTAL_STEPS   = 400         # steps 67–199 → Phase 2
 PHASE1_STEPS  = 133 #TOTAL_STEPS // 3  # first 1/3 steps → Phase 1
 
 E_SOLID = 2.1e5
@@ -24,9 +24,9 @@ E_VOID  = 1e-3 * E_SOLID
 NU      = 0.3
 P_SIMP  = 3.0
 
-# ─────────────────────────────────────────
+
 # Adjoint sensitivity  dC/dρ
-# ─────────────────────────────────────────
+
 def compute_compliance_and_sensitivity(rho_np: np.ndarray):
     """
     Run FEM, then compute adjoint sensitivity dC/dρ analytically.
@@ -78,9 +78,9 @@ def compute_compliance_and_sensitivity(rho_np: np.ndarray):
     return compliance, dC_drho
 
 
-# ─────────────────────────────────────────
+
 # Differentiable penalty terms
-# ─────────────────────────────────────────
+
 def volume_penalties(rho):
     """Lower-bound and upper-bound volume fraction penalties."""
     vol  = rho.mean()
@@ -112,28 +112,16 @@ def plot_design(design, output_dir, step, filename):
     plt.close()
 
 
-# ─────────────────────────────────────────
+
 # Main optimisation loop
-# ─────────────────────────────────────────
+
 def optimize_latent(model,
                     z_init=None,
                     n_steps=TOTAL_STEPS,
                     lr=0.05,
                     save_dir="latent_opt_results"):
-    """
-    Gradient descent on z  to minimise structural compliance.
 
-    Phase 1  (steps   0 – 66) : compliance  +  lower-volume penalty
-    Phase 2  (steps  67 – 199): compliance  +  lower/upper-volume
-                                             +  connectivity proxy
 
-    The linearisation trick
-    -----------------------
-    compliance_loss = sum(dC_drho.detach() * rho)
-      →  d(compliance_loss)/dz  =  dC_drho · (drho/dz)   ✓
-    This gives the exact compliance gradient through the decoder
-    without needing a differentiable FEM.
-    """
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
 
@@ -158,7 +146,8 @@ def optimize_latent(model,
 
     for step in range(n_steps):
         optimizer.zero_grad()
-
+        print("z BEFORE step:")
+        print(z.detach().cpu().numpy())
         # ── decode ──
         rho = model.decode(z).squeeze()          # (64,64)  grad enabled
 
@@ -193,6 +182,8 @@ def optimize_latent(model,
         torch.nn.utils.clip_grad_norm_([z], max_norm=1.0)
         optimizer.step()
         scheduler.step()
+        print("z AFTER step:")
+        print(z.detach().cpu().numpy())
 
         # ── bookkeeping ──
         vol_val  = float(rho_np.mean())
@@ -222,9 +213,9 @@ def optimize_latent(model,
     return best_rho, best_compliance, history
 
 
-# ─────────────────────────────────────────
+
 # Visualisation helpers
-# ─────────────────────────────────────────
+
 def _save_results(history, best_rho, best_compliance, best_step, save_dir):
     steps = np.arange(len(history["compliance"]))
 
@@ -279,9 +270,9 @@ def _save_results(history, best_rho, best_compliance, best_step, save_dir):
     print(f"    Results saved → {save_dir}")
 
 
-# ─────────────────────────────────────────
+
 # Entry point
-# ─────────────────────────────────────────
+
 if __name__ == "__main__":
     from evaluate_vae_report import TopologyVAE   # your VAE class
 
