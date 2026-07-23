@@ -1,5 +1,3 @@
-# fem_code.py
-
 
 import os
 import math
@@ -11,6 +9,8 @@ import matplotlib.pyplot as plt
 from scipy.ndimage import binary_dilation
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
+
+import vtk
 
 import torch
 
@@ -97,11 +97,7 @@ def element_stiffness_plane_stress(E, nu, xe, ye):
     return Ke
 
 def save_fem_to_vtk(geom, u, filename, domain_size=(20.0, 10.0)):
-    try:
-        import vtk
-    except ImportError:
-        print("⚠️ vtk not installed. Skipping VTK export.")
-        return
+
 
     ny, nx = geom.shape  # e.g., 64x64
     Lx, Ly = domain_size
@@ -249,11 +245,7 @@ def fem_physical_compliance(geom, load_node=None, load_value=-100.0,
 
 
 def is_feasible(rho_recon):
-    """
-    Check if a density field is feasible.
-    - rho_recon: (64, 64) numpy array in [0,1]
-    Returns: bool
-    """
+
     # Convert to binary using same threshold as dataset generation
     geom = (rho_recon > 0.5).astype(np.uint8)
     
@@ -291,14 +283,7 @@ def is_feasible(rho_recon):
     return True
 
 def compute_local_phi(xc, yc, theta_deg, L_half, t_full, m=M_MMC):
-    """
-    Compute phi_i(u) on the grid for a single MMC beam using equation (4) in the paper.
-    - xc, yc: center (normalized)
-    - theta_deg: orientation in degrees
-    - L_half: half-length = li/2 in paper notation
-    - t_full: full thickness ti; denominator uses ti/2
-    Return: phi array shape (GRID, GRID), float
-    """
+
     theta = math.radians(float(theta_deg))
     c = math.cos(theta)
     s = math.sin(theta)
@@ -320,12 +305,7 @@ def compute_local_phi(xc, yc, theta_deg, L_half, t_full, m=M_MMC):
 
 
 def build_phi_global(beams_params):
-    """
-    beams_params: list of tuples (xc,yc,theta,L_half,t_full) for top beams
-    Returns:
-      phi_global: (GRID, GRID) float
-      phi_components: list of phi_i for each of 6 components [top1,top2,top3,bot1,bot2,bot3]
-    """
+
     phis = []
     # top beams
     for (xc, yc, theta, L, t) in beams_params:
@@ -340,11 +320,7 @@ def build_phi_global(beams_params):
 
 
 def params_to_rho(params):
-    """
-    Convert 15 beam parameters to 64x64 rho field.
-    params: array of shape (15,) → [b1_x, b1_y, b1_theta, b1_L, b1_t, b2_x, ..., b3_t]
-    Returns: rho (64, 64) float32 in [0,1]
-    """
+
     # Split into 3 beams
     b1 = params[0:5]
     b2 = params[5:10]
